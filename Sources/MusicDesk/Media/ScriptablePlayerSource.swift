@@ -1,21 +1,59 @@
 import AppKit
-import Combine
 import Foundation
 import os
 
-/// Connection layer to Apple Music.
+/// AppleScript snippets for one scriptable player app.
 ///
-/// - Never launches Music: every script is guarded by an NSRunningApplication
-///   check (and an `application "Music" is running` check inside the script).
-/// - All AppleScript work runs on one serial background queue (`AppleScriptRunner`).
-/// - Updates come from the `com.apple.Music.playerInfo` distributed notification
-///   (immediate), a 1 s polling timer and NSWorkspace launch/terminate observers.
-@MainActor
-final class MusicController: ObservableObject {
-    @Published private(set) var state: PlaybackState = .idle
+/// `fetch` must return the list `{state, name, artist, position, duration}`
+/// with state "playing"/"paused"/"stopped" (or "notrunning"), position and
+/// duration in SECONDS. Do not wrap `player state` in `try`, so permission
+/// errors (-1743) propagate.
+struct PlayerScripts {
+    let fetch: String
+    let playPause: String
+    let nextTrack: String
+    let previousTrack: String
+    /// Absolute seek in seconds.
+    let seek: (Double) -> String
+}
 
-    private let runner = AppleScriptRunner()
-    private let logger = Logger(subsystem: "com.musicdesk.widget", category: "Music")
+/// Static description of a scriptable player (Apple Music, Spotify).
+struct ScriptablePlayerConfig {
+    let kind: MediaSourceKind
+    let bundleIdentifier: String
+    let appName: String
+    /// Distributed notification the app posts on every playback change.
+    let notificationName: String
+    let scripts: PlayerScripts
+}
+
+/// Shared implementation for players controlled via AppleScript
+/// (port of the 1.0 `MusicController`).
+///
+/// - Never launches the player: every script is guarded by an
+///   NSRunningApplication check (and an `is running` check inside the script).
+/// - All AppleScript work runs on one serial background queue (`AppleScriptRunner.shared`).
+/// - Updates come from the app's distributed notification (immediate), a 1 s
+///   polling timer (only while the app runs) and NSWorkspace launch/terminate observers.
+/// - Commands update the state optimistically and refetch right afterwards;
+///   after a seek, disagreeing polls are ignored for a short grace period.
+@MainActor
+class ScriptablePlayerSource: MediaSource {
+    let kind: MediaSourceKind
+
+    private(set) var state: NowPlaying = .idle {
+        didSet {
+            if state != oldValue {
+                onChange?(state)
+            }
+        }
+    }
+
+    var onChange: ((NowPlaying) -> Void)?
+
+    private let config: ScriptablePlayerConfig
+    private let runner = AppleScriptRunner.shared
+    private let logger: Logger
 
     private var isStarted = false
     private var pollTimer: Timer?
@@ -32,7 +70,7 @@ final class MusicController: ObservableObject {
     /// After a seek, polls that disagree with the optimistic position are ignored until then.
     private var seekGraceUntil: Date = .distantPast
 
-    /// Shortly after Music terminated, don't send any AppleEvents.
+    /// Shortly after the app terminated, don't send any AppleEvents.
     private var suppressScriptsUntil: Date = .distantPast
 
     /// Error bookkeeping (avoid log spam).
@@ -42,32 +80,46 @@ final class MusicController: ObservableObject {
 
     private var refetchWorkItem: DispatchWorkItem?
 
-    private static let musicBundleID = AppleScriptRunner.musicBundleIdentifier
-    private static let playerInfoNotification = Notification.Name("com.apple.Music.playerInfo")
     private static let seekGracePeriod: TimeInterval = 1.5
     private static let commandRefetchDelay: TimeInterval = 0.15
 
-    init() {}
+    init(config: ScriptablePlayerConfig) {
+        self.config = config
+        self.kind = config.kind
+        self.logger = Logger(subsystem: "com.musicdesk.widget", category: config.kind.rawValue)
+    }
+
+    // MARK: - Public helpers
+
+    var bundleIdentifier: String { config.bundleIdentifier }
+
+    /// True when the player app runs and may be scripted right now.
+    var isAppRunning: Bool { canSendScripts() }
 
     // MARK: - Lifecycle
 
-    /// Begins observing Music (distributed notification, 1 s timer, launch/terminate).
+    /// Begins observing (distributed notification, launch/terminate, polling while running).
     func start() {
         guard !isStarted else { return }
         isStarted = true
+        // Results of fetches started before a previous stop() are stale.
+        localGeneration += 1
+
+        let kind = config.kind
+        let bundleID = config.bundleIdentifier
 
         let distributed: NotificationCenter = DistributedNotificationCenter.default()
-        let playerInfoToken = distributed.addObserver(
-            forName: Self.playerInfoNotification,
+        let infoToken = distributed.addObserver(
+            forName: Notification.Name(config.notificationName),
             object: nil,
             queue: .main
         ) { [weak self] notification in
-            let info = PlayerInfoSnapshot(userInfo: notification.userInfo)
+            let info = ScriptedPlayerInfo(userInfo: notification.userInfo, kind: kind)
             MainActor.assumeIsolated {
                 self?.handlePlayerInfo(info)
             }
         }
-        observers.append((center: distributed, token: playerInfoToken))
+        observers.append((center: distributed, token: infoToken))
 
         let workspaceCenter: NotificationCenter = NSWorkspace.shared.notificationCenter
         let launchToken = workspaceCenter.addObserver(
@@ -75,10 +127,10 @@ final class MusicController: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] notification in
-            let bundleID = Self.bundleIdentifier(from: notification)
+            let launchedID = ScriptablePlayerSource.runningAppBundleIdentifier(from: notification)
             MainActor.assumeIsolated {
-                guard bundleID == Self.musicBundleID else { return }
-                self?.handleMusicLaunched()
+                guard launchedID == bundleID else { return }
+                self?.handleAppLaunched()
             }
         }
         observers.append((center: workspaceCenter, token: launchToken))
@@ -88,44 +140,44 @@ final class MusicController: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] notification in
-            let bundleID = Self.bundleIdentifier(from: notification)
+            let terminatedID = ScriptablePlayerSource.runningAppBundleIdentifier(from: notification)
             MainActor.assumeIsolated {
-                guard bundleID == Self.musicBundleID else { return }
-                self?.handleMusicTerminated()
+                guard terminatedID == bundleID else { return }
+                self?.handleAppTerminated()
             }
         }
         observers.append((center: workspaceCenter, token: terminateToken))
 
-        let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated {
-                self?.poll()
-            }
-        }
-        timer.tolerance = 0.2
-        RunLoop.main.add(timer, forMode: .common)
-        pollTimer = timer
+        logger.info("\(self.config.appName, privacy: .public) source started")
 
-        logger.info("MusicController started")
-        requestFetch()
+        if AppleScriptRunner.isRunning(bundleIdentifier: bundleID) {
+            startPolling()
+            requestFetch()
+        } else {
+            applyNotRunning()
+        }
     }
 
+    /// Stops observing and polling. The state is reset to `.idle`.
     func stop() {
         guard isStarted else { return }
         isStarted = false
-        pollTimer?.invalidate()
-        pollTimer = nil
+        stopPolling()
         refetchWorkItem?.cancel()
         refetchWorkItem = nil
+        fetchPending = false
         for entry in observers {
             entry.center.removeObserver(entry.token)
         }
         observers.removeAll()
-        logger.info("MusicController stopped")
+        logger.info("\(self.config.appName, privacy: .public) source stopped")
+        applyNotRunning()
     }
 
     // MARK: - Commands
 
     func playPause() {
+        guard isStarted else { return }
         guard canSendScripts() else { applyNotRunning(); return }
         if state.hasTrack {
             let now = Date()
@@ -136,23 +188,26 @@ final class MusicController: ObservableObject {
             localGeneration += 1
             state = updated
         }
-        runCommand(Scripts.playPause, cacheKey: "playpause")
+        runCommand(config.scripts.playPause, cacheKey: "playpause")
     }
 
     func nextTrack() {
+        guard isStarted else { return }
         guard canSendScripts() else { applyNotRunning(); return }
         localGeneration += 1
-        runCommand(Scripts.nextTrack, cacheKey: "next")
+        runCommand(config.scripts.nextTrack, cacheKey: "next")
     }
 
     func previousTrack() {
+        guard isStarted else { return }
         guard canSendScripts() else { applyNotRunning(); return }
         localGeneration += 1
-        runCommand(Scripts.previousTrack, cacheKey: "previous")
+        runCommand(config.scripts.previousTrack, cacheKey: "previous")
     }
 
     /// Optimistic local update of `state`, then AppleScript "set player position".
     func seek(to seconds: Double) {
+        guard isStarted else { return }
         guard canSendScripts() else { applyNotRunning(); return }
         guard state.hasTrack, seconds.isFinite else { return }
 
@@ -165,18 +220,34 @@ final class MusicController: ObservableObject {
         updated.position = target
         updated.updatedAt = Date()
         localGeneration += 1
-        seekGraceUntil = Date().addingTimeInterval(Self.seekGracePeriod)
+        seekGraceUntil = Date().addingTimeInterval(ScriptablePlayerSource.seekGracePeriod)
         state = updated
 
-        // Not cached: the value is part of the source. String(format:) uses the
-        // POSIX locale, so the decimal separator is always ".".
-        let source = Scripts.seek(to: target)
-        runCommand(source, cacheKey: nil)
+        // Not cached: the value is part of the source.
+        runCommand(config.scripts.seek(target), cacheKey: nil)
     }
 
     // MARK: - Polling / fetching
 
+    private func startPolling() {
+        guard pollTimer == nil else { return }
+        let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.poll()
+            }
+        }
+        timer.tolerance = 0.2
+        RunLoop.main.add(timer, forMode: .common)
+        pollTimer = timer
+    }
+
+    private func stopPolling() {
+        pollTimer?.invalidate()
+        pollTimer = nil
+    }
+
     private func poll() {
+        guard isStarted else { return }
         if permissionDenied, Date().timeIntervalSince(lastDeniedAttempt) < 5 {
             return
         }
@@ -184,10 +255,12 @@ final class MusicController: ObservableObject {
     }
 
     private func canSendScripts() -> Bool {
-        Date() >= suppressScriptsUntil && AppleScriptRunner.isMusicRunning()
+        Date() >= suppressScriptsUntil
+            && AppleScriptRunner.isRunning(bundleIdentifier: config.bundleIdentifier)
     }
 
     private func requestFetch() {
+        guard isStarted else { return }
         guard canSendScripts() else {
             applyNotRunning()
             return
@@ -201,26 +274,31 @@ final class MusicController: ObservableObject {
         let generation = localGeneration
 
         runner.run(
-            source: Scripts.fetch,
+            bundleIdentifier: config.bundleIdentifier,
+            source: config.scripts.fetch,
             cacheKey: "fetch",
-            parse: { descriptor in FetchResult(descriptor: descriptor) },
+            parse: { descriptor in ScriptedFetchResult(descriptor: descriptor) },
             completion: { [weak self] outcome in
                 self?.handleFetch(outcome, generation: generation)
             }
         )
     }
 
-    private func handleFetch(_ outcome: AppleScriptOutcome<FetchResult>, generation: Int) {
+    private func handleFetch(_ outcome: AppleScriptOutcome<ScriptedFetchResult>, generation: Int) {
         fetchInFlight = false
+        guard isStarted else {
+            fetchPending = false
+            return
+        }
 
         switch outcome {
-        case .musicNotRunning:
+        case .appNotRunning:
             applyNotRunning()
         case let .failure(code, message):
             handleScriptError(code: code, message: message)
         case let .success(result):
             clearErrorState()
-            if !result.musicRunning {
+            if !result.appRunning {
                 applyNotRunning()
             } else if generation != localGeneration {
                 // Started before a local optimistic change: stale, fetch again.
@@ -236,10 +314,12 @@ final class MusicController: ObservableObject {
         }
     }
 
-    private func apply(_ result: FetchResult) {
+    private func apply(_ result: ScriptedFetchResult) {
         let now = result.timestamp
-        var fetched = PlaybackState(
-            isMusicRunning: true,
+        var fetched = NowPlaying(
+            source: config.kind,
+            appBundleIdentifier: config.bundleIdentifier,
+            appName: config.appName,
             isPlaying: result.playerState == "playing",
             title: result.title.isEmpty ? nil : result.title,
             artist: result.artist.isEmpty ? nil : result.artist,
@@ -253,7 +333,7 @@ final class MusicController: ObservableObject {
         }
 
         let current = state
-        let sameTrack = current.isMusicRunning
+        let sameTrack = current.source == config.kind
             && current.title == fetched.title
             && current.artist == fetched.artist
             && abs(current.duration - fetched.duration) < 0.5
@@ -287,25 +367,27 @@ final class MusicController: ObservableObject {
 
     private func runCommand(_ source: String, cacheKey: String?) {
         runner.run(
+            bundleIdentifier: config.bundleIdentifier,
             source: source,
             cacheKey: cacheKey,
             parse: { _ in true },
             completion: { [weak self] outcome in
-                guard let self else { return }
+                guard let self, self.isStarted else { return }
                 switch outcome {
                 case .success:
                     self.clearErrorState()
-                case .musicNotRunning:
+                case .appNotRunning:
                     self.applyNotRunning()
                 case let .failure(code, message):
                     self.handleScriptError(code: code, message: message)
                 }
-                self.scheduleRefetch(after: Self.commandRefetchDelay)
+                self.scheduleRefetch(after: ScriptablePlayerSource.commandRefetchDelay)
             }
         )
     }
 
     private func scheduleRefetch(after delay: TimeInterval) {
+        guard isStarted else { return }
         refetchWorkItem?.cancel()
         let item = DispatchWorkItem { [weak self] in
             MainActor.assumeIsolated {
@@ -319,15 +401,18 @@ final class MusicController: ObservableObject {
 
     // MARK: - Notifications
 
-    private func handlePlayerInfo(_ info: PlayerInfoSnapshot) {
-        guard AppleScriptRunner.isMusicRunning() else {
+    private func handlePlayerInfo(_ info: ScriptedPlayerInfo) {
+        guard isStarted else { return }
+        guard canSendScripts() else {
             applyNotRunning()
             return
         }
 
         let now = Date()
         var updated = state
-        updated.isMusicRunning = true
+        updated.source = config.kind
+        updated.appBundleIdentifier = config.bundleIdentifier
+        updated.appName = config.appName
         updated.position = state.position(at: now)
         updated.updatedAt = now
 
@@ -351,8 +436,14 @@ final class MusicController: ObservableObject {
             if let artist = info.artist {
                 updated.artist = artist.isEmpty ? nil : artist
             }
-            if let totalMs = info.totalTimeMs, totalMs.isFinite, totalMs > 0 {
-                updated.duration = totalMs / 1000.0
+            if let duration = info.durationSeconds, duration.isFinite, duration > 0 {
+                updated.duration = duration
+            }
+            // Spotify reports the position directly (not during a seek grace period,
+            // where the optimistic value wins until a fetch confirms it).
+            if let position = info.positionSeconds, position.isFinite, position >= 0,
+               Date() >= seekGraceUntil {
+                updated.position = updated.duration > 0 ? min(position, updated.duration) : position
             }
         } else if playerState == "stopped" {
             updated.title = nil
@@ -370,23 +461,33 @@ final class MusicController: ObservableObject {
         scheduleRefetch(after: 0.05)
     }
 
-    private func handleMusicLaunched() {
-        logger.info("Apple Music launched")
+    private func handleAppLaunched() {
+        guard isStarted else { return }
+        logger.info("\(self.config.appName, privacy: .public) launched")
         suppressScriptsUntil = .distantPast
-        // Music needs a moment before it answers AppleEvents.
+        startPolling()
+        // The app needs a moment before it answers AppleEvents.
         scheduleRefetch(after: 1.0)
+        // Let the manager re-evaluate the source selection.
+        onChange?(state)
     }
 
-    private func handleMusicTerminated() {
-        logger.info("Apple Music terminated")
+    private func handleAppTerminated() {
+        guard isStarted else { return }
+        logger.info("\(self.config.appName, privacy: .public) terminated")
         // runningApplications can lag a little behind the notification;
-        // don't risk an AppleEvent that would relaunch Music.
+        // don't risk an AppleEvent that would relaunch the app.
         suppressScriptsUntil = Date().addingTimeInterval(2.0)
+        stopPolling()
         refetchWorkItem?.cancel()
         refetchWorkItem = nil
-        runner.resetCache()
+        runner.resetCache(bundleIdentifier: config.bundleIdentifier)
         clearErrorState()
-        applyNotRunning()
+        if state != .idle {
+            applyNotRunning()       // publishes via didSet
+        } else {
+            onChange?(state)        // still let the manager re-evaluate
+        }
     }
 
     // MARK: - State helpers
@@ -399,7 +500,7 @@ final class MusicController: ObservableObject {
 
     private func clearErrorState() {
         if permissionDenied {
-            logger.info("AppleEvent access to Music is now permitted")
+            logger.info("AppleEvent access to \(self.config.appName, privacy: .public) is now permitted")
         }
         permissionDenied = false
         lastErrorCode = nil
@@ -410,27 +511,29 @@ final class MusicController: ObservableObject {
         case -1743, -1744:
             // errAEEventNotPermitted / errAEEventWouldRequireUserConsent
             if !permissionDenied {
-                logger.error("Not permitted to control Apple Music (\(code, privacy: .public)). Allow MusicDesk in System Settings > Privacy & Security > Automation.")
+                logger.error("Not permitted to control \(self.config.appName, privacy: .public) (\(code, privacy: .public)). Allow MusicDesk in System Settings > Privacy & Security > Automation.")
             }
             permissionDenied = true
             lastDeniedAttempt = Date()
-            let denied = PlaybackState(
-                isMusicRunning: true,
+            let denied = NowPlaying(
+                source: config.kind,
+                appBundleIdentifier: config.bundleIdentifier,
+                appName: config.appName,
                 isPlaying: false,
                 title: nil,
                 artist: nil,
                 position: 0,
                 duration: 0,
-                updatedAt: PlaybackState.idle.updatedAt
+                updatedAt: NowPlaying.idle.updatedAt
             )
             if state != denied {
                 state = denied
             }
         case -600, -609, -903:
-            // App not running / connection invalid / no such app: Music went away.
-            runner.resetCache()
+            // App not running / connection invalid / no such app: the app went away.
+            runner.resetCache(bundleIdentifier: config.bundleIdentifier)
             if lastErrorCode != code {
-                logger.debug("Music not reachable (\(code, privacy: .public)): \(message, privacy: .public)")
+                logger.debug("\(self.config.appName, privacy: .public) not reachable (\(code, privacy: .public)): \(message, privacy: .public)")
             }
             applyNotRunning()
         default:
@@ -441,7 +544,7 @@ final class MusicController: ObservableObject {
         lastErrorCode = code
     }
 
-    nonisolated private static func bundleIdentifier(from notification: Notification) -> String? {
+    nonisolated private static func runningAppBundleIdentifier(from notification: Notification) -> String? {
         let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
         return app?.bundleIdentifier
     }
@@ -449,28 +552,52 @@ final class MusicController: ObservableObject {
 
 // MARK: - Helper types
 
-/// Sendable extract of the `com.apple.Music.playerInfo` userInfo.
-private struct PlayerInfoSnapshot: Sendable {
+/// Sendable extract of a player's distributed notification userInfo.
+///
+/// Apple Music (`com.apple.Music.playerInfo`): "Player State", "Name",
+/// "Artist", "Total Time" (ms).
+/// Spotify (`com.spotify.client.PlaybackStateChanged`): "Player State",
+/// "Name", "Artist", "Duration" (ms), "Playback Position" (s).
+private struct ScriptedPlayerInfo: Sendable {
     var playerState: String?
     var name: String?
     var artist: String?
-    var totalTimeMs: Double?
+    var durationSeconds: Double?
+    var positionSeconds: Double?
 
-    init(userInfo: [AnyHashable: Any]?) {
+    init(userInfo: [AnyHashable: Any]?, kind: MediaSourceKind) {
         playerState = userInfo?["Player State"] as? String
         name = userInfo?["Name"] as? String
         artist = userInfo?["Artist"] as? String
-        if let number = userInfo?["Total Time"] as? NSNumber {
-            totalTimeMs = number.doubleValue
-        } else {
-            totalTimeMs = nil
+        durationSeconds = nil
+        positionSeconds = nil
+        switch kind {
+        case .appleMusic:
+            if let ms = Self.number(userInfo?["Total Time"]) {
+                durationSeconds = ms / 1000.0
+            }
+        case .spotify:
+            if let ms = Self.number(userInfo?["Duration"]) {
+                durationSeconds = ms / 1000.0
+            }
+            positionSeconds = Self.number(userInfo?["Playback Position"])
+        case .system:
+            break
         }
+    }
+
+    private static func number(_ value: Any?) -> Double? {
+        if let number = value as? NSNumber {
+            let d = number.doubleValue
+            return d.isFinite ? d : nil
+        }
+        return nil
     }
 }
 
-/// Parsed result of `Scripts.fetch` (an AppleEvent list {state, name, artist, pos, dur}).
-private struct FetchResult: Sendable {
-    var musicRunning: Bool
+/// Parsed result of a fetch script (an AppleEvent list {state, name, artist, pos, dur}).
+private struct ScriptedFetchResult: Sendable {
+    var appRunning: Bool
     var playerState: String   // "playing" / "paused" / "stopped"
     var title: String
     var artist: String
@@ -480,9 +607,9 @@ private struct FetchResult: Sendable {
 
     init(descriptor: NSAppleEventDescriptor) {
         timestamp = Date()
-        let state = FetchResult.string(descriptor, 1)
+        let state = ScriptedFetchResult.string(descriptor, 1)
         if descriptor.numberOfItems < 5 || state.isEmpty {
-            musicRunning = true
+            appRunning = true
             playerState = "stopped"
             title = ""
             artist = ""
@@ -490,12 +617,12 @@ private struct FetchResult: Sendable {
             duration = 0
             return
         }
-        musicRunning = state != "notrunning"
+        appRunning = state != "notrunning"
         playerState = state
-        title = FetchResult.string(descriptor, 2)
-        artist = FetchResult.string(descriptor, 3)
-        position = FetchResult.number(descriptor, 4)
-        duration = FetchResult.number(descriptor, 5)
+        title = ScriptedFetchResult.string(descriptor, 2)
+        artist = ScriptedFetchResult.string(descriptor, 3)
+        position = ScriptedFetchResult.number(descriptor, 4)
+        duration = ScriptedFetchResult.number(descriptor, 5)
     }
 
     private static func string(_ list: NSAppleEventDescriptor, _ index: Int) -> String {
@@ -508,100 +635,5 @@ private struct FetchResult: Sendable {
         guard list.numberOfItems >= index, let item = list.atIndex(index) else { return 0 }
         let value = item.doubleValue
         return value.isFinite ? value : 0
-    }
-}
-
-// MARK: - Scripts
-
-private enum Scripts {
-    /// One round trip: returns {state, name, artist, position, duration}.
-    /// `player state` is NOT wrapped in `try`, so permission errors (-1743) propagate.
-    static let fetch = """
-    if application "Music" is running then
-    \twith timeout of 3 seconds
-    \t\ttell application "Music"
-    \t\t\tset st to "stopped"
-    \t\t\tset nm to ""
-    \t\t\tset ar to ""
-    \t\t\tset pos to 0.0
-    \t\t\tset dur to 0.0
-    \t\t\tset ps to player state
-    \t\t\tif ps is playing then
-    \t\t\t\tset st to "playing"
-    \t\t\telse if ps is paused then
-    \t\t\t\tset st to "paused"
-    \t\t\telse if ps is fast forwarding or ps is rewinding then
-    \t\t\t\tset st to "playing"
-    \t\t\tend if
-    \t\t\ttry
-    \t\t\t\tset p to player position
-    \t\t\t\tif p is not missing value then set pos to p
-    \t\t\tend try
-    \t\t\ttry
-    \t\t\t\tset t to current track
-    \t\t\t\ttry
-    \t\t\t\t\tset x to name of t
-    \t\t\t\t\tif x is not missing value then set nm to x
-    \t\t\t\tend try
-    \t\t\t\ttry
-    \t\t\t\t\tset x to artist of t
-    \t\t\t\t\tif x is not missing value then set ar to x
-    \t\t\t\tend try
-    \t\t\t\ttry
-    \t\t\t\t\tset x to duration of t
-    \t\t\t\t\tif x is not missing value then set dur to x
-    \t\t\t\tend try
-    \t\t\tend try
-    \t\t\tif nm is "" and st is not "stopped" then
-    \t\t\t\ttry
-    \t\t\t\t\tset x to current stream title
-    \t\t\t\t\tif x is not missing value then set nm to x
-    \t\t\t\tend try
-    \t\t\tend if
-    \t\t\treturn {st, nm, ar, pos, dur}
-    \t\tend tell
-    \tend timeout
-    else
-    \treturn {"notrunning", "", "", 0.0, 0.0}
-    end if
-    """
-
-    static let playPause = """
-    if application "Music" is running then
-    \twith timeout of 3 seconds
-    \t\ttell application "Music" to playpause
-    \tend timeout
-    end if
-    return true
-    """
-
-    static let nextTrack = """
-    if application "Music" is running then
-    \twith timeout of 3 seconds
-    \t\ttell application "Music" to next track
-    \tend timeout
-    end if
-    return true
-    """
-
-    static let previousTrack = """
-    if application "Music" is running then
-    \twith timeout of 3 seconds
-    \t\ttell application "Music" to previous track
-    \tend timeout
-    end if
-    return true
-    """
-
-    static func seek(to seconds: Double) -> String {
-        let value = String(format: "%.3f", seconds)
-        return """
-        if application "Music" is running then
-        \twith timeout of 3 seconds
-        \t\ttell application "Music" to set player position to \(value)
-        \tend timeout
-        end if
-        return true
-        """
     }
 }
