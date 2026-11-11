@@ -15,6 +15,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var menuController: ContextMenuController?
     private var settingsWindowController: SettingsWindowController?
     private var terminationSignalSource: DispatchSourceSignal?
+    private var fullScreenObserver: FullScreenObserver?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let settings = AppSettings()
@@ -69,6 +70,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // The app is never active, so order front regardless of activation.
         panel.orderFrontRegardless()
 
+        // Hide the widget while another app is in full-screen mode on its
+        // screen (the panel joins all Spaces, including full-screen ones).
+        let fullScreenObserver = FullScreenObserver(window: panel)
+        fullScreenObserver.onChange = { [weak panel] isFullScreen in
+            guard let panel else { return }
+            panel.ignoresMouseEvents = isFullScreen
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.2
+                panel.animator().alphaValue = isFullScreen ? 0 : 1
+            }
+        }
+        fullScreenObserver.start()
+        self.fullScreenObserver = fullScreenObserver
+
         installTerminationSignalHandler()
         media.start()
         UpdateController.shared.start()
@@ -79,6 +94,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         // Also terminates the mediaremote-adapter child process.
         media?.stop()
+        fullScreenObserver?.stop()
         NotificationCenter.default.removeObserver(self)
     }
 

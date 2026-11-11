@@ -54,11 +54,6 @@ final class WidgetPanel: NSPanel {
             NSMenu.popUpContextMenu(menu, with: event, for: view)
             return
         }
-        // A click makes the widget "active" (key) without activating the app
-        // (nonactivating panel), so ⌘, / ⌘Q reach `performKeyEquivalent`.
-        if event.type == .leftMouseDown, !isKeyWindow {
-            makeKey()
-        }
         super.sendEvent(event)
     }
 }

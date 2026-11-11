@@ -92,10 +92,10 @@ Ist „Alles auf dem Mac“ ausdrücklich gewählt, aber nicht verfügbar, verh�
 Repository: [github.com/lukestark-glitch/MusicDesk-Widget](https://github.com/lukestark-glitch/MusicDesk-Widget).
 
 - **Empfohlen – GitHub Releases:** Öffne die Seite
-  [Releases](https://github.com/lukestark-glitch/MusicDesk-Widget/releases) und lade bei der neuesten MusicDesk-Version die Datei **`MusicDesk-1.1.0.zip`** herunter.
+  [Releases](https://github.com/lukestark-glitch/MusicDesk-Widget/releases) und lade bei der neuesten MusicDesk-Version die Datei **`MusicDesk-1.1.1.zip`** herunter.
   (Releases werden automatisch von GitHub Actions erstellt, sobald ein Tag wie `v1.1.0` veröffentlicht wird.)
 - **Alternativ – Build-Artefakt:** Im Reiter
-  [Actions](https://github.com/lukestark-glitch/MusicDesk-Widget/actions) den neuesten erfolgreichen Lauf des MusicDesk-Workflows öffnen und unten unter **„Artifacts“** die ZIP-Datei herunterladen. (Dafür musst du bei GitHub angemeldet sein. Das Artefakt ist eine ZIP, in der die eigentliche `MusicDesk-1.1.0.zip` steckt – ggf. zweimal entpacken.)
+  [Actions](https://github.com/lukestark-glitch/MusicDesk-Widget/actions) den neuesten erfolgreichen Lauf des MusicDesk-Workflows öffnen und unten unter **„Artifacts“** die ZIP-Datei herunterladen. (Dafür musst du bei GitHub angemeldet sein. Das Artefakt ist eine ZIP, in der die eigentliche `MusicDesk-1.1.1.zip` steckt – ggf. zweimal entpacken.)
 
 **Update von 1.0:** MusicDesk 1.0 über **Rechtsklick → „MusicDesk beenden“** schließen, die neue `MusicDesk.app` in den Ordner **Programme** ziehen und „Ersetzen“ wählen. Deine Einstellungen (Farbe, Position, Sperre, Autostart) bleiben erhalten. Weil die neue Version eine neue Signatur hat, fragt macOS ggf. erneut nach der Music-Erlaubnis und zeigt einmal die Gatekeeper-Warnung (Schritt 3).
 
@@ -163,7 +163,7 @@ Nur bauen, ohne zu installieren:
 ./scripts/build.sh
 ```
 
-Das Ergebnis liegt dann in `dist/MusicDesk.app` und als ZIP in `dist/MusicDesk-1.1.0.zip`. Am Ende führt das Skript zur Information den Adapter-Test aus (ein Fehlschlag bricht den Build nicht ab).
+Das Ergebnis liegt dann in `dist/MusicDesk.app` und als ZIP in `dist/MusicDesk-1.1.1.zip`. Am Ende führt das Skript zur Information den Adapter-Test aus (ein Fehlschlag bricht den Build nicht ab).
 
 ---
 
@@ -371,7 +371,10 @@ und neu starten – das Widget erscheint wieder unten mittig.
 Das ist normal: Jeder neue Build erhält eine neue (Ad-hoc-)Signatur, und macOS behandelt ihn wie eine neue App. Einfach wieder „OK“ klicken. Falls die Abfrage nicht kommt, siehe oben (`tccutil reset …`).
 
 **⌘, öffnet die Einstellungen nicht**
-Das Kürzel wirkt, sobald MusicDesk aktiv ist (z. B. nach einem Klick auf das Widget oder wenn das Einstellungsfenster offen ist). Sonst einfach **Rechtsklick → „Einstellungen …“**.
+Das Kürzel wirkt nur, wenn MusicDesk aktiv ist – z. B. solange das Einstellungsfenster offen ist. Ein Klick auf das Widget macht MusicDesk bewusst **nicht** aktiv, damit deine Tastatureingaben in der App bleiben, in der du gerade arbeitest. Zum Öffnen also einfach **Rechtsklick → „Einstellungen …“**.
+
+**Das Widget verschwindet, wenn eine App im Vollbild ist**
+Das ist Absicht (seit 1.1.1): Solange auf dem Bildschirm des Widgets eine App im Vollbildmodus läuft, blendet sich MusicDesk aus und kommt zurück, sobald du den Vollbildmodus verlässt oder zum Schreibtisch wechselst. Ein nur maximiertes Fenster zählt nicht als Vollbild.
 
 **Das automatische Update schlägt fehl**
 Die alte Version bleibt in diesem Fall erhalten. Häufige Ursachen: keine Internetverbindung, oder der Ordner mit `MusicDesk.app` ist nicht beschreibbar (z. B. App liegt auf einem fremden Benutzerkonto oder schreibgeschützten Volume). Lade dann `MusicDesk-<Version>.zip` von der [Release-Seite](https://github.com/lukestark-glitch/MusicDesk-Widget/releases) und installiere sie wie oben beschrieben.
@@ -459,7 +462,7 @@ git tag v1.1.0
 git push origin v1.1.0
 ```
 
-Alternativ ohne Tag: Im Reiter *Actions* → Workflow „MusicDesk“ → *Run workflow* mit Häkchen „GitHub-Release … erstellen“ starten. Der Workflow baut dann die App und legt automatisch ein GitHub-Release mit `MusicDesk-1.1.0.zip` an. Für eine neue Version vorher `CFBundleShortVersionString`/`CFBundleVersion` in `Resources/Info.plist` anpassen – `scripts/build.sh` liest die Version von dort und benennt die ZIP entsprechend (`MusicDesk-<Version>.zip`). Änderungen bitte im [CHANGELOG](CHANGELOG.md) eintragen.
+Alternativ ohne Tag: Im Reiter *Actions* → Workflow „MusicDesk“ → *Run workflow* mit Häkchen „GitHub-Release … erstellen“ starten. Der Workflow baut dann die App und legt automatisch ein GitHub-Release mit `MusicDesk-1.1.1.zip` an. Für eine neue Version vorher `CFBundleShortVersionString`/`CFBundleVersion` in `Resources/Info.plist` anpassen – `scripts/build.sh` liest die Version von dort und benennt die ZIP entsprechend (`MusicDesk-<Version>.zip`). Änderungen bitte im [CHANGELOG](CHANGELOG.md) eintragen.
 
 ---
 

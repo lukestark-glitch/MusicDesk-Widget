@@ -2,6 +2,12 @@
 
 Alle nennenswerten Änderungen an MusicDesk. Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/1.1.0/), Versionen nach [Semantic Versioning](https://semver.org/lang/de/).
 
+## [1.1.1] – 2026-11-11
+
+### Behoben
+- Das Widget war auch auf den Vollbild-Spaces anderer Apps zu sehen (z. B. hinter Videos mit schwarzen Rändern). Es blendet sich jetzt aus, solange auf seinem Bildschirm eine App im Vollbild läuft, und kehrt danach automatisch zurück.
+- Ein Klick auf das Widget (z. B. Play/Pause) hat seit 1.1.0 den Tastaturfokus übernommen, sodass Eingaben danach nicht mehr in der vorher benutzten App landeten. Der Fokus bleibt jetzt dort; ⌘, funktioniert dafür nur noch, solange MusicDesk aktiv ist (z. B. bei offenem Einstellungsfenster) – sonst Rechtsklick → „Einstellungen …“.
+
 ## [1.1.0] – 2026-11-11
 
 ### Neu
