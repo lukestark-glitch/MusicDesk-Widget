@@ -7,6 +7,11 @@ on:
       - "v*"
   pull_request:
   workflow_dispatch:
+    inputs:
+      release:
+        description: "GitHub-Release v<Version aus Info.plist> erstellen"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -50,13 +55,22 @@ jobs:
           if-no-files-found: error
 
       - name: Release name
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.release
         id: rel
-        run: echo "name=MusicDesk v${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            tag="$GITHUB_REF_NAME"
+          else
+            tag="v$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Resources/Info.plist)"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "name=MusicDesk $tag" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.rel.outputs.tag }}
+          target_commitish: ${{ github.sha }}
           name: ${{ steps.rel.outputs.name }}
           files: dist/MusicDesk-*.zip

@@ -291,7 +291,7 @@ git tag v1.0.0
 git push origin v1.0.0
 ```
 
-Der Workflow baut dann die App und legt automatisch ein GitHub-Release mit `MusicDesk-1.0.0.zip` an. Für eine neue Version vorher `CFBundleShortVersionString`/`CFBundleVersion` in `Resources/Info.plist` anpassen – `scripts/build.sh` liest die Version von dort und benennt die ZIP entsprechend (`MusicDesk-<Version>.zip`).
+Alternativ ohne Tag: Im Reiter *Actions* → Workflow „MusicDesk“ → *Run workflow* mit Häkchen „GitHub-Release … erstellen“ starten. Der Workflow baut dann die App und legt automatisch ein GitHub-Release mit `MusicDesk-1.0.0.zip` an. Für eine neue Version vorher `CFBundleShortVersionString`/`CFBundleVersion` in `Resources/Info.plist` anpassen – `scripts/build.sh` liest die Version von dort und benennt die ZIP entsprechend (`MusicDesk-<Version>.zip`).
 
 ---
 
