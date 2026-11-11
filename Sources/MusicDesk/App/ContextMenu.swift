@@ -3,12 +3,15 @@ import Foundation
 
 /// Builds the right-click menu of the widget. A fresh menu is built for
 /// every click so all checkmarks reflect the current state.
+/// Colors and all other appearance options live in the settings window.
 @MainActor
 final class ContextMenuController: NSObject {
     private let settings: AppSettings
+    private let openSettings: @MainActor () -> Void
 
-    init(settings: AppSettings) {
+    init(settings: AppSettings, openSettings: @escaping @MainActor () -> Void) {
         self.settings = settings
+        self.openSettings = openSettings
         super.init()
     }
 
@@ -16,19 +19,14 @@ final class ContextMenuController: NSObject {
         let menu = NSMenu(title: "MusicDesk")
         menu.autoenablesItems = false
 
-        // Farbe ▸ Schwarz / Weiß / Automatisch
-        let colorMenu = NSMenu(title: "Farbe")
-        colorMenu.autoenablesItems = false
-        for mode in WidgetColorMode.allCases {
-            let item = NSMenuItem(title: mode.menuTitle, action: #selector(selectColorMode(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = mode.rawValue
-            item.state = settings.colorMode == mode ? .on : .off
-            colorMenu.addItem(item)
+        let updates = UpdateController.shared
+        if updates.isUpdateAvailable {
+            let version = updates.latestVersion.map { " (\($0))" } ?? ""
+            let updateItem = NSMenuItem(title: "Update installieren …" + version, action: #selector(installUpdate(_:)), keyEquivalent: "")
+            updateItem.target = self
+            menu.addItem(updateItem)
+            menu.addItem(.separator())
         }
-        let colorItem = NSMenuItem(title: "Farbe", action: nil, keyEquivalent: "")
-        colorItem.submenu = colorMenu
-        menu.addItem(colorItem)
 
         let lockItem = NSMenuItem(title: "Position sperren", action: #selector(togglePositionLock(_:)), keyEquivalent: "")
         lockItem.target = self
@@ -50,11 +48,21 @@ final class ContextMenuController: NSObject {
 
         menu.addItem(.separator())
 
+        // Shows ⌘, as hint; the shortcut itself is handled by the main menu
+        // and by WidgetPanel.performKeyEquivalent.
+        let settingsItem = NSMenuItem(title: "Einstellungen …", action: #selector(showSettings(_:)), keyEquivalent: ",")
+        settingsItem.keyEquivalentModifierMask = [.command]
+        settingsItem.target = self
+        menu.addItem(settingsItem)
+
+        menu.addItem(.separator())
+
         let aboutItem = NSMenuItem(title: "Über MusicDesk", action: #selector(showAbout(_:)), keyEquivalent: "")
         aboutItem.target = self
         menu.addItem(aboutItem)
 
-        let quitItem = NSMenuItem(title: "MusicDesk beenden", action: #selector(quit(_:)), keyEquivalent: "")
+        let quitItem = NSMenuItem(title: "MusicDesk beenden", action: #selector(quit(_:)), keyEquivalent: "q")
+        quitItem.keyEquivalentModifierMask = [.command]
         quitItem.target = self
         menu.addItem(quitItem)
 
@@ -63,10 +71,8 @@ final class ContextMenuController: NSObject {
 
     // MARK: - Actions
 
-    @objc private func selectColorMode(_ sender: NSMenuItem) {
-        guard let raw = sender.representedObject as? String,
-              let mode = WidgetColorMode(rawValue: raw) else { return }
-        settings.colorMode = mode
+    @objc private func installUpdate(_ sender: NSMenuItem) {
+        UpdateController.shared.installUpdate()
     }
 
     @objc private func togglePositionLock(_ sender: NSMenuItem) {
@@ -77,17 +83,28 @@ final class ContextMenuController: NSObject {
         LoginItem.toggle()
     }
 
+    @objc private func showSettings(_ sender: NSMenuItem) {
+        openSettings()
+    }
+
     @objc private func showAbout(_ sender: NSMenuItem) {
-        // An accessory app must be activated for the About panel to come to front.
-        if #available(macOS 14.0, *) {
-            NSApp.activate()
-        } else {
-            NSApp.activate(ignoringOtherApps: true)
-        }
+        AppActivation.activate()
         NSApp.orderFrontStandardAboutPanel(nil)
     }
 
     @objc private func quit(_ sender: NSMenuItem) {
         NSApp.terminate(nil)
+    }
+}
+
+/// Brings the (accessory) app to the front, e.g. before showing a window.
+@MainActor
+enum AppActivation {
+    static func activate() {
+        if #available(macOS 14.0, *) {
+            NSApp.activate()
+        } else {
+            NSApp.activate(ignoringOtherApps: true)
+        }
     }
 }

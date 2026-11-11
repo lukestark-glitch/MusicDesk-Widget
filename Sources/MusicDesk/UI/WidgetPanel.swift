@@ -9,6 +9,11 @@ import SwiftUI
 final class WidgetPanel: NSPanel {
     /// Supplies the right-click menu (built fresh for every click).
     var contextMenuProvider: (() -> NSMenu?)?
+    /// Handles key equivalents (⌘, / ⌘Q) while the panel is key. The panel
+    /// can be key without the app being active (`.nonactivatingPanel`), in
+    /// which case the main menu would not see the shortcut. Returns true
+    /// when the event was handled.
+    var keyEquivalentHandler: ((NSEvent) -> Bool)?
 
     // Key status is allowed (so drags inside SwiftUI work reliably);
     // `.nonactivatingPanel` keeps the app itself from activating.
@@ -30,6 +35,13 @@ final class WidgetPanel: NSPanel {
         isMovableByWindowBackground = false // only the title area moves the window
         isExcludedFromWindowsMenu = true
         animationBehavior = .none
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if let handler = keyEquivalentHandler, handler(event) {
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
     }
 
     /// Right-click (or Ctrl-click) anywhere on the visible content opens the
