@@ -11,6 +11,14 @@ DEST_APP="/Applications/MusicDesk.app"
 
 echo "==> Beende laufendes MusicDesk (falls aktiv) ..."
 pkill -x MusicDesk || true
+# Warten, bis MusicDesk sauber beendet ist (max. 5 s), sonst hart beenden.
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    pgrep -x MusicDesk >/dev/null || break
+    sleep 0.5
+done
+pkill -9 -x MusicDesk 2>/dev/null || true
+# Evtl. verwaisten Adapter-Prozess (perl) der systemweiten Quelle beenden.
+pkill -f "MusicDesk.app/Contents/Resources/mediaremote-adapter.pl" 2>/dev/null || true
 sleep 1
 
 echo "==> Installiere nach $DEST_APP ..."

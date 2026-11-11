@@ -14,6 +14,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var panel: WidgetPanel?
     private var menuController: ContextMenuController?
     private var settingsWindowController: SettingsWindowController?
+    private var terminationSignalSource: DispatchSourceSignal?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let settings = AppSettings()
@@ -68,6 +69,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // The app is never active, so order front regardless of activation.
         panel.orderFrontRegardless()
 
+        installTerminationSignalHandler()
         media.start()
         UpdateController.shared.start()
         LoginItem.registerOnFirstLaunchIfNeeded(settings: settings)
@@ -88,6 +90,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         openSettings()
         return false
+    }
+
+    /// `pkill`/`kill` (install.sh, uninstall.sh) send SIGTERM, which would end
+    /// the process without `applicationWillTerminate` – and leave the adapter's
+    /// perl child running. Route SIGTERM through a normal termination instead.
+    private func installTerminationSignalHandler() {
+        signal(SIGTERM, SIG_IGN)
+        let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        source.setEventHandler {
+            MainActor.assumeIsolated {
+                NSApp.terminate(nil)
+            }
+        }
+        source.resume()
+        terminationSignalSource = source
     }
 
     // MARK: - Settings

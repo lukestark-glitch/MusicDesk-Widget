@@ -655,8 +655,10 @@ private final class AdapterStream: @unchecked Sendable {
         lock.unlock()
         guard let process, process.isRunning else { return }
         process.terminate()
-        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1.5) { [weak self] in
-            self?.killIfStillRunning()
+        // Strong capture on purpose: the slot already dropped this stream, so a
+        // weak reference would be gone and the SIGKILL fallback never ran.
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1.5) {
+            self.killIfStillRunning()
         }
     }
 

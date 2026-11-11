@@ -253,7 +253,7 @@ Die Laufschrift läuft nur, wenn der Text nicht ganz hineinpasst, und pausiert b
 |---|---|
 | **Position sperren** | aus |
 | **Beim Login starten** | an (beim ersten Start eingeschaltet) |
-| **Auf Standard zurücksetzen** | setzt alle Darstellungs- und Quellen-Einstellungen zurück (nach Rückfrage). Position, Sperre und Autostart bleiben unverändert. |
+| **Auf Standard zurücksetzen …** | setzt Quelle, Darstellung, Fortschrittsleiste, Titel und den Update-Schalter zurück (nach Rückfrage). Position, Sperre und Autostart bleiben unverändert. |
 
 ---
 
