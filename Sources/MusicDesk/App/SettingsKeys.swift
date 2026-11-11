@@ -24,12 +24,14 @@ enum SettingsKey {
     static let knobVisibility = "knobVisibility"             // KnobVisibility.rawValue
     static let titleOverflow = "titleOverflow"               // TitleOverflow.rawValue
     static let dimArtist = "dimArtist"                       // Bool
+    static let autoCheckUpdates = "autoCheckUpdates"         // Bool
+    static let lastUpdateCheck = "lastUpdateCheck"           // Double (timeIntervalSince1970)
 
     /// Keys reset by "Auf Standard zurücksetzen" (not position/login state).
     static let resettable: [String] = [
         colorMode, sourcePreference, showSourceIcon, customColorHex,
         readabilityShadow, barOpacity, barGlass, highlightPlayed,
-        knobVisibility, titleOverflow, dimArtist,
+        knobVisibility, titleOverflow, dimArtist, autoCheckUpdates,
     ]
 }
 
@@ -47,6 +49,7 @@ enum SettingsDefault {
     static let knobVisibility = KnobVisibility.always.rawValue
     static let titleOverflow = TitleOverflow.truncate.rawValue
     static let dimArtist = true
+    static let autoCheckUpdates = true
 }
 
 /// Widget foreground color. Raw values persisted (1.0: black/white/automatic).
