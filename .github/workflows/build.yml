@@ -1,0 +1,62 @@
+name: MusicDesk
+
+on:
+  push:
+    branches: ["**"]
+    tags:
+      - "v*"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (Universal)
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          swift --version
+          xcodebuild -version
+
+      - name: Build
+        run: ./scripts/build.sh
+
+      - name: Verify architectures
+        run: |
+          archs="$(lipo -archs dist/MusicDesk.app/Contents/MacOS/MusicDesk)"
+          echo "Architectures: $archs"
+          [[ " $archs " == *" arm64 "* ]] || { echo "arm64 missing"; exit 1; }
+          [[ " $archs " == *" x86_64 "* ]] || { echo "x86_64 missing"; exit 1; }
+
+      - name: Verify signature
+        run: |
+          codesign -dv --verbose=2 dist/MusicDesk.app
+          codesign --verify --deep --strict --verbose=2 dist/MusicDesk.app
+
+      - name: Show Info.plist
+        run: plutil -p dist/MusicDesk.app/Contents/Info.plist
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MusicDesk
+          path: dist/MusicDesk-*.zip
+          if-no-files-found: error
+
+      - name: Release name
+        if: startsWith(github.ref, 'refs/tags/v')
+        id: rel
+        run: echo "name=MusicDesk v${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ steps.rel.outputs.name }}
+          files: dist/MusicDesk-*.zip
