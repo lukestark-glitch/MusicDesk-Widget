@@ -23,9 +23,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # macos-14: older SDK (Xcode 15.x) compile check,
+        # macos-15-intel: Intel runner, Xcode 16 / macOS-15-SDK (compile check
+        #   without the macOS 26 SDK – the `#if compiler(>=6.2)` branch is skipped).
         # macos-26: newest Xcode/SDK – only this runner publishes artifacts/releases.
-        os: [macos-14, macos-15, macos-26]
+        # (macos-14 was retired by GitHub; arm64 macos-15 often lacks capacity.)
+        os: [macos-15-intel, macos-26]
     env:
       RELEASE_RUNNER: macos-26
     steps:
