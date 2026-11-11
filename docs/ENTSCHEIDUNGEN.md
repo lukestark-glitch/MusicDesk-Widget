@@ -192,7 +192,7 @@ Zusätzlich beobachtet `NSWorkspace` Start und Beenden von Music, damit das Widg
 
 ## 25. CI auf mehreren macOS-Versionen
 
-**Entscheidung:** Der Workflow baut parallel auf macOS 14, 15 und 26 (`fail-fast: false`); das Release und das Artefakt für Nutzer kommen nur vom neuesten Runner.
+**Entscheidung:** Der Workflow baut parallel mit Xcode 16.4 und Xcode 26.3, beide auf dem Intel-Runner `macos-15-intel` (`fail-fast: false`); Release und Nutzer-Artefakt kommen nur vom Xcode-26-Job (Pflicht: Swift ≥ 6.2, sonst Abbruch). Ursprünglich geplant waren macOS 14/15/26 – GitHub hat macOS 14 eingestellt, und die Apple-Silicon-Runner (macos-15, macos-26) wurden am 11.11.2026 mehrfach wegen fehlender Kapazität nach 15 Minuten abgebrochen. Das Intel-Image enthält Xcode 16.x und 26.x, ein Universal-Binary lässt sich dort genauso bauen.
 
 **Warum:** Entwickelt wurde wieder ohne lokalen Swift-Compiler (Linux-Container). Neue APIs (Symbol-Übergänge ab macOS 14, Liquid Glass ab macOS 26) müssen sowohl mit älteren SDKs (dort fehlen die Symbole) als auch mit dem neuesten Xcode kompilieren. Nur so fallen fehlende Verfügbarkeitsprüfungen sofort auf.
 

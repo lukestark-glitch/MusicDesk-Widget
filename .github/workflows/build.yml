@@ -18,36 +18,48 @@ permissions:
 
 jobs:
   build:
-    name: Build (Universal, ${{ matrix.os }})
+    name: Build (Universal, Xcode ${{ matrix.xcode }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        # macos-15-intel: Intel runner, Xcode 16 / macOS-15-SDK (compile check
-        #   without the macOS 26 SDK – the `#if compiler(>=6.2)` branch is skipped).
-        # macos-26: newest Xcode/SDK – only this runner publishes artifacts/releases.
-        # (macos-14 was retired by GitHub; arm64 macos-15 often lacks capacity.)
-        os: [macos-15-intel, macos-26]
-    env:
-      RELEASE_RUNNER: macos-26
+        # Both jobs run on the Intel macOS 15 image: it has plenty of capacity
+        # (arm64 macos-15/macos-26 jobs were repeatedly cancelled for lack of
+        # runners) and ships Xcode 16.x as well as Xcode 26.x.
+        # - Xcode 16.4: compile check with an older SDK/compiler (the
+        #   `#if compiler(>=6.2)` Liquid Glass branch is skipped).
+        # - Xcode 26.3: newest SDK, compiles Liquid Glass – only this job
+        #   uploads the artifact and publishes releases.
+        include:
+          - os: macos-15-intel
+            xcode: "16.4"
+            publish: false
+          - os: macos-15-intel
+            xcode: "26.3"
+            publish: true
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Select newest Xcode
-        if: matrix.os == 'macos-26'
+      - name: Select Xcode ${{ matrix.xcode }}
         run: |
-          ls /Applications | grep Xcode || true
-          xcode="$(ls -d /Applications/Xcode*.app 2>/dev/null | grep -vi beta | sort -V | tail -n 1 || true)"
-          if [[ -z "$xcode" ]]; then
-            xcode="$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -n 1 || true)"
+          ls -d /Applications/Xcode*.app || true
+          xcode="/Applications/Xcode_${{ matrix.xcode }}.app"
+          if [[ ! -d "$xcode" ]]; then
+            # Fall back to the newest installed Xcode with the same major version.
+            major="${{ matrix.xcode }}"; major="${major%%.*}"
+            xcode="$(find /Applications -maxdepth 1 -name "Xcode_${major}*.app" | sort -V | tail -n 1)"
           fi
-          if [[ -n "$xcode" ]]; then
-            echo "Using $xcode"
-            sudo xcode-select -s "$xcode/Contents/Developer"
-          else
-            echo "No Xcode found in /Applications, keeping default"
-          fi
+          [[ -n "$xcode" && -d "$xcode" ]] || { echo "Xcode ${{ matrix.xcode }} nicht gefunden"; exit 1; }
+          echo "Using $xcode"
+          sudo xcode-select -s "$xcode/Contents/Developer"
+
+      - name: Require Swift 6.2+ for the release build (Liquid Glass)
+        if: matrix.publish
+        run: |
+          v="$(swift --version 2>&1 | sed -nE 's/.*Swift version ([0-9]+\.[0-9]+).*/\1/p' | head -n 1)"
+          echo "Swift $v"
+          [[ "$(printf '%s\n6.2\n' "$v" | sort -V | head -n 1)" == "6.2" ]] || { echo "Swift >= 6.2 benötigt (ist $v)"; exit 1; }
 
       - name: Toolchain
         run: |
@@ -85,10 +97,10 @@ jobs:
           code=$?
           set -e
           echo "Adapter-Test exit code: $code (0 = funktionsfähig; auf CI-Runnern ohne Medien oft != 0)"
-          echo "Adapter-Test (${{ matrix.os }}): Exit-Code $code" >> "$GITHUB_STEP_SUMMARY"
+          echo "Adapter-Test (Xcode ${{ matrix.xcode }}): Exit-Code $code" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload artifact
-        if: matrix.os == env.RELEASE_RUNNER
+        if: matrix.publish
         uses: actions/upload-artifact@v4
         with:
           name: MusicDesk
@@ -96,7 +108,7 @@ jobs:
           if-no-files-found: error
 
       - name: Release name
-        if: matrix.os == env.RELEASE_RUNNER && (startsWith(github.ref, 'refs/tags/v') || inputs.release)
+        if: matrix.publish && (startsWith(github.ref, 'refs/tags/v') || inputs.release)
         id: rel
         run: |
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
@@ -108,7 +120,7 @@ jobs:
           echo "name=MusicDesk $tag" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub release
-        if: matrix.os == env.RELEASE_RUNNER && (startsWith(github.ref, 'refs/tags/v') || inputs.release)
+        if: matrix.publish && (startsWith(github.ref, 'refs/tags/v') || inputs.release)
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.rel.outputs.tag }}

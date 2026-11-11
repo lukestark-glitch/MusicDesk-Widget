@@ -450,7 +450,7 @@ Hintergründe zu den einzelnen Entscheidungen: [docs/ENTSCHEIDUNGEN.md](docs/ENT
 
 ### CI
 
-Der Workflow [`.github/workflows/build.yml`](.github/workflows/build.yml) läuft bei jedem Push und Pull-Request, bei Tags `v*` sowie manuell (*workflow_dispatch*) – parallel auf **macOS 14, 15 und 26**, damit der Code sowohl mit älteren SDKs als auch mit dem neuesten Xcode kompiliert. Er baut die App mit `scripts/build.sh`, prüft Architekturen (`lipo`), Signatur (`codesign -v`), `Info.plist` und den eingebetteten Adapter, gibt das Ergebnis des Adapter-Tests aus (ohne den Lauf scheitern zu lassen) und lädt die ZIP als Artefakt hoch. Das Release wird nur vom neuesten Runner (macOS 26) erstellt.
+Der Workflow [`.github/workflows/build.yml`](.github/workflows/build.yml) läuft bei jedem Push und Pull-Request, bei Tags `v*` sowie manuell (*workflow_dispatch*) – parallel mit **Xcode 16.4** (älteres SDK, ohne Liquid Glass) und **Xcode 26.3** (neuestes SDK, mit Liquid Glass), beide auf dem Intel-Runner `macos-15-intel`, der zuverlässig verfügbar ist. Er baut die App mit `scripts/build.sh`, prüft Architekturen (`lipo`), Signatur (`codesign -v`), `Info.plist` und den eingebetteten Adapter, gibt das Ergebnis des Adapter-Tests aus (ohne den Lauf scheitern zu lassen) und lädt die ZIP als Artefakt hoch. Das Release wird nur vom Xcode-26-Job erstellt; dieser bricht ab, falls der Compiler älter als Swift 6.2 ist, damit kein Release ohne Liquid Glass entsteht.
 
 ### Release erstellen
 
