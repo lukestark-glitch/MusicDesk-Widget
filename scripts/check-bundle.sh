@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Prüft ein vorhandenes MusicDesk.app-Bundle (Standard: dist/MusicDesk.app):
-# Info.plist-Schlüssel, ausführbare Datei, Architekturen, Signatur.
+# Info.plist-Schlüssel, ausführbare Datei, mediaremote-adapter,
+# Architekturen, Signatur.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -9,11 +10,27 @@ APP="${1:-$ROOT/dist/MusicDesk.app}"
 PLIST="$APP/Contents/Info.plist"
 EXE="$APP/Contents/MacOS/MusicDesk"
 ICON="$APP/Contents/Resources/AppIcon.icns"
+ADAPTER_SCRIPT="$APP/Contents/Resources/mediaremote-adapter.pl"
+ADAPTER_FW="$APP/Contents/Frameworks/MediaRemoteAdapter.framework"
+ADAPTER_FW_BIN="$ADAPTER_FW/MediaRemoteAdapter"
+ADAPTER_HELPER="$APP/Contents/Helpers/MediaRemoteAdapterTestClient"
 PB=/usr/libexec/PlistBuddy
 
 errors=0
 fail() { echo "  FEHLER: $*" >&2; errors=$((errors + 1)); }
 ok() { echo "  OK: $*"; }
+
+check_archs() {
+    local label="$1" file="$2" archs required
+    archs="$(lipo -archs "$file" 2>/dev/null || true)"
+    for required in arm64 x86_64; do
+        if [[ " $archs " == *" $required "* ]]; then
+            ok "$label: Architektur $required"
+        else
+            fail "$label: Architektur $required fehlt (gefunden: '${archs}')"
+        fi
+    done
+}
 
 echo "==> Prüfe Bundle: $APP"
 
@@ -57,19 +74,48 @@ fi
 
 if [[ -f "$EXE" && -x "$EXE" ]]; then
     ok "Ausführbare Datei vorhanden"
-    archs="$(lipo -archs "$EXE" 2>/dev/null || true)"
-    for required in arm64 x86_64; do
-        if [[ " $archs " == *" $required "* ]]; then
-            ok "Architektur $required"
-        else
-            fail "Architektur $required fehlt (gefunden: '${archs}')"
-        fi
-    done
+    check_archs "MusicDesk" "$EXE"
 else
     fail "Ausführbare Datei fehlt oder ist nicht ausführbar: $EXE"
 fi
 
 if [[ -f "$ICON" ]]; then ok "AppIcon.icns vorhanden"; else fail "AppIcon.icns fehlt"; fi
+
+# mediaremote-adapter (Quelle "Alles auf dem Mac")
+if [[ -f "$ADAPTER_SCRIPT" ]]; then
+    ok "mediaremote-adapter.pl vorhanden"
+    if perl -c "$ADAPTER_SCRIPT" >/dev/null 2>&1; then
+        ok "mediaremote-adapter.pl: Perl-Syntax gültig"
+    else
+        fail "mediaremote-adapter.pl: Perl-Syntaxfehler"
+    fi
+else
+    fail "mediaremote-adapter.pl fehlt: $ADAPTER_SCRIPT"
+fi
+
+if [[ -d "$ADAPTER_FW" && -e "$ADAPTER_FW_BIN" ]]; then
+    ok "MediaRemoteAdapter.framework vorhanden"
+    check_archs "MediaRemoteAdapter.framework" "$ADAPTER_FW_BIN"
+    if codesign --verify --strict "$ADAPTER_FW" 2>/dev/null; then
+        ok "MediaRemoteAdapter.framework: Signatur gültig"
+    else
+        fail "MediaRemoteAdapter.framework: Signaturprüfung fehlgeschlagen"
+    fi
+else
+    fail "MediaRemoteAdapter.framework fehlt oder unvollständig: $ADAPTER_FW"
+fi
+
+if [[ -f "$ADAPTER_HELPER" && -x "$ADAPTER_HELPER" ]]; then
+    ok "MediaRemoteAdapterTestClient vorhanden"
+    check_archs "MediaRemoteAdapterTestClient" "$ADAPTER_HELPER"
+    if codesign --verify --strict "$ADAPTER_HELPER" 2>/dev/null; then
+        ok "MediaRemoteAdapterTestClient: Signatur gültig"
+    else
+        fail "MediaRemoteAdapterTestClient: Signaturprüfung fehlgeschlagen"
+    fi
+else
+    fail "MediaRemoteAdapterTestClient fehlt oder ist nicht ausführbar: $ADAPTER_HELPER"
+fi
 
 if codesign --verify --deep --strict --verbose=2 "$APP"; then
     ok "Signatur gültig"

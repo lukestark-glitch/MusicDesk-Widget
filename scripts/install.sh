@@ -25,4 +25,5 @@ open "$DEST_APP"
 
 echo ""
 echo "MusicDesk wurde installiert: $DEST_APP"
-echo "Hinweis: Beim ersten Start fragt macOS nach der Erlaubnis, Apple Music zu steuern – bitte mit \"OK\" bestätigen."
+echo "Hinweis: macOS fragt einmalig nach der Erlaubnis, Apple Music bzw. Spotify zu steuern – bitte mit \"OK\" bestätigen."
+echo "Die Quelle \"Alles auf dem Mac\" (z. B. YouTube im Browser) braucht keine Erlaubnis."

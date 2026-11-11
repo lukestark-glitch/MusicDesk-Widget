@@ -18,16 +18,40 @@ permissions:
 
 jobs:
   build:
-    name: Build (Universal)
-    runs-on: macos-15
+    name: Build (Universal, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # macos-14: older SDK (Xcode 15.x) compile check,
+        # macos-26: newest Xcode/SDK – only this runner publishes artifacts/releases.
+        os: [macos-14, macos-15, macos-26]
+    env:
+      RELEASE_RUNNER: macos-26
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Select newest Xcode
+        if: matrix.os == 'macos-26'
+        run: |
+          ls /Applications | grep Xcode || true
+          xcode="$(ls -d /Applications/Xcode*.app 2>/dev/null | grep -vi beta | sort -V | tail -n 1 || true)"
+          if [[ -z "$xcode" ]]; then
+            xcode="$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -n 1 || true)"
+          fi
+          if [[ -n "$xcode" ]]; then
+            echo "Using $xcode"
+            sudo xcode-select -s "$xcode/Contents/Developer"
+          else
+            echo "No Xcode found in /Applications, keeping default"
+          fi
 
       - name: Toolchain
         run: |
           swift --version
           xcodebuild -version
+          cmake --version || echo "cmake missing (build.sh installs it via Homebrew)"
 
       - name: Build
         run: ./scripts/build.sh
@@ -47,7 +71,22 @@ jobs:
       - name: Show Info.plist
         run: plutil -p dist/MusicDesk.app/Contents/Info.plist
 
+      - name: Adapter-Test
+        continue-on-error: true
+        timeout-minutes: 2
+        run: |
+          app="$PWD/dist/MusicDesk.app/Contents"
+          set +e
+          /usr/bin/perl "$app/Resources/mediaremote-adapter.pl" \
+            "$app/Frameworks/MediaRemoteAdapter.framework" \
+            "$app/Helpers/MediaRemoteAdapterTestClient" test
+          code=$?
+          set -e
+          echo "Adapter-Test exit code: $code (0 = funktionsfähig; auf CI-Runnern ohne Medien oft != 0)"
+          echo "Adapter-Test (${{ matrix.os }}): Exit-Code $code" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Upload artifact
+        if: matrix.os == env.RELEASE_RUNNER
         uses: actions/upload-artifact@v4
         with:
           name: MusicDesk
@@ -55,7 +94,7 @@ jobs:
           if-no-files-found: error
 
       - name: Release name
-        if: startsWith(github.ref, 'refs/tags/v') || inputs.release
+        if: matrix.os == env.RELEASE_RUNNER && (startsWith(github.ref, 'refs/tags/v') || inputs.release)
         id: rel
         run: |
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
@@ -67,7 +106,7 @@ jobs:
           echo "name=MusicDesk $tag" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub release
-        if: startsWith(github.ref, 'refs/tags/v') || inputs.release
+        if: matrix.os == env.RELEASE_RUNNER && (startsWith(github.ref, 'refs/tags/v') || inputs.release)
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.rel.outputs.tag }}
