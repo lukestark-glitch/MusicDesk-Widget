@@ -92,10 +92,10 @@ Ist „Alles auf dem Mac“ ausdrücklich gewählt, aber nicht verfügbar, verh�
 Repository: [github.com/lukestark-glitch/MusicDesk-Widget](https://github.com/lukestark-glitch/MusicDesk-Widget).
 
 - **Empfohlen – GitHub Releases:** Öffne die Seite
-  [Releases](https://github.com/lukestark-glitch/MusicDesk-Widget/releases) und lade bei der neuesten MusicDesk-Version die Datei **`MusicDesk-1.1.1.zip`** herunter.
+  [Releases](https://github.com/lukestark-glitch/MusicDesk-Widget/releases) und lade bei der neuesten MusicDesk-Version die Datei **`MusicDesk-1.1.2.zip`** herunter.
   (Releases werden automatisch von GitHub Actions erstellt, sobald ein Tag wie `v1.1.0` veröffentlicht wird.)
 - **Alternativ – Build-Artefakt:** Im Reiter
-  [Actions](https://github.com/lukestark-glitch/MusicDesk-Widget/actions) den neuesten erfolgreichen Lauf des MusicDesk-Workflows öffnen und unten unter **„Artifacts“** die ZIP-Datei herunterladen. (Dafür musst du bei GitHub angemeldet sein. Das Artefakt ist eine ZIP, in der die eigentliche `MusicDesk-1.1.1.zip` steckt – ggf. zweimal entpacken.)
+  [Actions](https://github.com/lukestark-glitch/MusicDesk-Widget/actions) den neuesten erfolgreichen Lauf des MusicDesk-Workflows öffnen und unten unter **„Artifacts“** die ZIP-Datei herunterladen. (Dafür musst du bei GitHub angemeldet sein. Das Artefakt ist eine ZIP, in der die eigentliche `MusicDesk-1.1.2.zip` steckt – ggf. zweimal entpacken.)
 
 **Update von 1.0:** MusicDesk 1.0 über **Rechtsklick → „MusicDesk beenden“** schließen, die neue `MusicDesk.app` in den Ordner **Programme** ziehen und „Ersetzen“ wählen. Deine Einstellungen (Farbe, Position, Sperre, Autostart) bleiben erhalten. Weil die neue Version eine neue Signatur hat, fragt macOS ggf. erneut nach der Music-Erlaubnis und zeigt einmal die Gatekeeper-Warnung (Schritt 3).
 
@@ -163,7 +163,7 @@ Nur bauen, ohne zu installieren:
 ./scripts/build.sh
 ```
 
-Das Ergebnis liegt dann in `dist/MusicDesk.app` und als ZIP in `dist/MusicDesk-1.1.1.zip`. Am Ende führt das Skript zur Information den Adapter-Test aus (ein Fehlschlag bricht den Build nicht ab).
+Das Ergebnis liegt dann in `dist/MusicDesk.app` und als ZIP in `dist/MusicDesk-1.1.2.zip`. Am Ende führt das Skript zur Information den Adapter-Test aus (ein Fehlschlag bricht den Build nicht ab).
 
 ---
 
@@ -283,12 +283,13 @@ MusicDesk hält sich ab Version 1.1 selbst aktuell (von 1.0 auf 1.1 bitte einmal
 1. Die neue `MusicDesk-<Version>.zip` wird aus dem GitHub-Release **heruntergeladen** und entpackt.
 2. Die neue App wird **geprüft**: richtige Bundle-ID (`com.musicdesk.widget`), wirklich neuere Version, gültige Signatur.
 3. Das **Quarantäne-Merkmal wird entfernt** – es erscheint also keine Gatekeeper-Warnung wie beim ersten Download.
-4. Die App **ersetzt die bisherige an ihrem aktuellen Ort** (meist `/Applications`) und **startet neu**.
+4. Die App **ersetzt die bisherige an ihrem aktuellen Ort** (meist `/Applications`) und **startet neu**. Läuft MusicDesk dagegen als schreibgeschützte Kopie (*App Translocation*, siehe [Fehlerbehebung](#fehlerbehebung)) von außerhalb des Programme-Ordners – z. B. direkt aus „Downloads“ –, installiert das Update (ab 1.1.2) die neue Version nach `/Applications` (bzw. `~/Applications`, wenn `/Applications` nicht beschreibbar ist), entfernt dort das Quarantäne-Merkmal und legt die alte Kopie in den **Papierkorb**.
 
 Geht dabei etwas schief, **bleibt die alte Version unverändert erhalten** und MusicDesk zeigt eine Fehlermeldung. Du kannst das Update dann jederzeit manuell von der Release-Seite installieren.
 
 > **Hinweise:**
 > - Nach einem Update fragt macOS unter Umständen **noch einmal nach der Apple-Music- bzw. Spotify-Erlaubnis**. Das liegt an der Ad-hoc-Signatur, die sich mit jeder Version ändert – einfach wieder „OK“ klicken.
+> - **Liegt MusicDesk nicht im Ordner Programme**, zeigt die App beim Start (einmal pro Version) den Hinweis „MusicDesk sollte im Ordner Programme liegen, damit Updates funktionieren.“ **„In Programme verschieben“** legt die App dorthin, entfernt das Quarantäne-Merkmal, startet neu und legt die alte Kopie in den Papierkorb; „Später“ lässt alles, wie es ist.
 > - Der Ordner, in dem `MusicDesk.app` liegt, muss für deinen Benutzer **beschreibbar** sein (bei `/Applications` als Administrator normalerweise der Fall). Sonst schlägt die Installation fehl und die alte Version bleibt bestehen.
 
 ---
@@ -376,6 +377,17 @@ Das Kürzel wirkt nur, wenn MusicDesk aktiv ist – z. B. solange das Einstellun
 **Das Widget verschwindet, wenn eine App im Vollbild ist**
 Das ist Absicht (seit 1.1.1): Solange auf dem Bildschirm des Widgets eine App im Vollbildmodus läuft, blendet sich MusicDesk aus und kommt zurück, sobald du den Vollbildmodus verlässt oder zum Schreibtisch wechselst. Ein nur maximiertes Fenster zählt nicht als Vollbild.
 
+**„Update fehlgeschlagen – Keine Schreibrechte für /var/folders/…/AppTranslocation/…“**
+Das ist *App Translocation*: Eine aus dem Internet geladene App (mit Quarantäne-Merkmal), die **nicht mit dem Finder verschoben** wurde – z. B. direkt aus „Downloads“ oder vom Schreibtisch gestartet –, führt macOS aus Sicherheitsgründen aus einer **zufälligen, schreibgeschützten Kopie** unter `/var/folders/…/AppTranslocation/…` aus. Diese Kopie kann kein Updater ersetzen. Ab MusicDesk 1.1.2 erkennt der Updater das und installiert die neue Version stattdessen in den Ordner Programme (siehe [Updates](#updates)). Bis 1.1.1 – oder wenn es trotzdem nicht klappt – hilft es, das einmal von Hand zu lösen:
+
+1. MusicDesk beenden (Rechtsklick → „MusicDesk beenden“).
+2. `MusicDesk.app` im **Finder** in den Ordner **Programme** ziehen (wichtig: per Finder, nicht per Terminal).
+3. Im Terminal das Quarantäne-Merkmal entfernen:
+   ```bash
+   xattr -dr com.apple.quarantine /Applications/MusicDesk.app
+   ```
+4. MusicDesk aus „Programme“ öffnen. Danach funktionieren die automatischen Updates wieder.
+
 **Das automatische Update schlägt fehl**
 Die alte Version bleibt in diesem Fall erhalten. Häufige Ursachen: keine Internetverbindung, oder der Ordner mit `MusicDesk.app` ist nicht beschreibbar (z. B. App liegt auf einem fremden Benutzerkonto oder schreibgeschützten Volume). Lade dann `MusicDesk-<Version>.zip` von der [Release-Seite](https://github.com/lukestark-glitch/MusicDesk-Widget/releases) und installiere sie wie oben beschrieben.
 
@@ -448,6 +460,7 @@ Einstellungen (UserDefaults-Domain `com.musicdesk.widget`):
 
 - aus 1.0: `colorMode`, `positionLocked`, `windowOriginX`, `windowOriginY`, `windowScreenID`, `windowScreenName`, `didAttemptInitialLoginRegistration`
 - neu in 1.1: `sourcePreference`, `showSourceIcon`, `customColorHex`, `readabilityShadow`, `barOpacity`, `barGlass`, `highlightPlayed`, `knobVisibility`, `titleOverflow`, `dimArtist`, `autoCheckUpdates`, `lastUpdateCheck`
+- neu in 1.1.2: `didShowMoveToApplicationsHint-<Version>`, `pendingOldCopyTrash`
 
 Hintergründe zu den einzelnen Entscheidungen: [docs/ENTSCHEIDUNGEN.md](docs/ENTSCHEIDUNGEN.md).
 
@@ -462,7 +475,7 @@ git tag v1.1.0
 git push origin v1.1.0
 ```
 
-Alternativ ohne Tag: Im Reiter *Actions* → Workflow „MusicDesk“ → *Run workflow* mit Häkchen „GitHub-Release … erstellen“ starten. Der Workflow baut dann die App und legt automatisch ein GitHub-Release mit `MusicDesk-1.1.1.zip` an. Für eine neue Version vorher `CFBundleShortVersionString`/`CFBundleVersion` in `Resources/Info.plist` anpassen – `scripts/build.sh` liest die Version von dort und benennt die ZIP entsprechend (`MusicDesk-<Version>.zip`). Änderungen bitte im [CHANGELOG](CHANGELOG.md) eintragen.
+Alternativ ohne Tag: Im Reiter *Actions* → Workflow „MusicDesk“ → *Run workflow* mit Häkchen „GitHub-Release … erstellen“ starten. Der Workflow baut dann die App und legt automatisch ein GitHub-Release mit `MusicDesk-1.1.2.zip` an. Für eine neue Version vorher `CFBundleShortVersionString`/`CFBundleVersion` in `Resources/Info.plist` anpassen – `scripts/build.sh` liest die Version von dort und benennt die ZIP entsprechend (`MusicDesk-<Version>.zip`). Änderungen bitte im [CHANGELOG](CHANGELOG.md) eintragen.
 
 ---
 

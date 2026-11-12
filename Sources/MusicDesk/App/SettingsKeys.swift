@@ -26,6 +26,12 @@ enum SettingsKey {
     static let dimArtist = "dimArtist"                       // Bool
     static let autoCheckUpdates = "autoCheckUpdates"         // Bool
     static let lastUpdateCheck = "lastUpdateCheck"           // Double (timeIntervalSince1970)
+    // 1.1.2
+    /// Prefix + CFBundleShortVersionString, Bool: start-up hint shown for that version.
+    static let moveToApplicationsHintPrefix = "didShowMoveToApplicationsHint-"
+    /// ["path": String, "version": String]: old copy to move to the Trash once
+    /// the new version runs from an Applications folder.
+    static let pendingOldCopyTrash = "pendingOldCopyTrash"
 
     /// Keys reset by "Auf Standard zurücksetzen" (not position/login state).
     static let resettable: [String] = [

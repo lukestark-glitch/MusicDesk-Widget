@@ -2,6 +2,17 @@
 
 Alle nennenswerten Änderungen an MusicDesk. Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/1.1.0/), Versionen nach [Semantic Versioning](https://semver.org/lang/de/).
 
+## [1.1.2] – 2026-11-12
+
+### Behoben
+- **Update fehlgeschlagen – „Keine Schreibrechte für /var/folders/…/AppTranslocation/…“:** Lief MusicDesk direkt aus „Downloads“ o. Ä. (mit Quarantäne-Merkmal, nicht per Finder verschoben), startete macOS die App aus einer schreibgeschützten Translocation-Kopie, und der Updater gab auf. Der Updater erkennt diese *App Translocation* jetzt (Pfad und Security-API) und ermittelt den Originalort: Liegt das Original in `/Applications` oder `~/Applications`, wird es dort ersetzt; sonst wird die neue Version nach `/Applications` installiert (falls nicht beschreibbar: `~/Applications`), die alte Kopie kommt nach dem erfolgreichen Update in den Papierkorb. Das Quarantäne-Merkmal wird auch am Zielort entfernt. Prüfungen (Bundle-ID, Version, Signatur) und Rückfall auf die alte Version bei Fehlern bleiben unverändert; zusätzlich wird keine fremde App und keine neuere MusicDesk-Version am Zielort überschrieben.
+
+### Neu
+- **Hinweis beim Start**, wenn MusicDesk nicht im Ordner Programme liegt (oder translociert läuft) – einmal pro Version, mit „In Programme verschieben“ (verschiebt, entfernt die Quarantäne, startet neu) und „Später“.
+
+### Hinweis
+- Wer noch 1.1.1 oder älter **translociert** nutzt, kann das Update auf 1.1.2 nicht automatisch installieren (der alte Updater ist betroffen). Einmal von Hand lösen: siehe README → *Fehlerbehebung*.
+
 ## [1.1.1] – 2026-11-11
 
 ### Behoben

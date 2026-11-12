@@ -87,6 +87,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         installTerminationSignalHandler()
         media.start()
         UpdateController.shared.start()
+        // A little later, so the widget is visible before the one-time hint.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            MainActor.assumeIsolated {
+                UpdateController.shared.showMoveToApplicationsHintIfNeeded()
+            }
+        }
         LoginItem.registerOnFirstLaunchIfNeeded(settings: settings)
         log.info("MusicDesk launched")
     }

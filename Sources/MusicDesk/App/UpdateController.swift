@@ -52,6 +52,7 @@ final class UpdateController: ObservableObject {
     func start() {
         guard !started else { return }
         started = true
+        cleanUpOldCopyIfNeeded()
         if Bundle.main.bundleIdentifier != nil {
             UNUserNotificationCenter.current().delegate = notificationDelegate
         }
@@ -79,11 +80,16 @@ final class UpdateController: ObservableObject {
             return
         }
 
+        let location = AppLocation.detect(Bundle.main.bundleURL)
         NSApp.activate(ignoringOtherApps: true)
         let confirm = NSAlert()
         confirm.alertStyle = .informational
         confirm.messageText = "Update auf \(release.version) installieren?"
-        confirm.informativeText = "MusicDesk wird neu gestartet."
+        if location.isTranslocated && !location.isInApplicationsFolder {
+            confirm.informativeText = "MusicDesk liegt nicht im Ordner Programme. Die neue Version wird deshalb in „Programme“ installiert, die alte Kopie kommt in den Papierkorb. MusicDesk wird neu gestartet."
+        } else {
+            confirm.informativeText = "MusicDesk wird neu gestartet."
+        }
         confirm.addButton(withTitle: "Installieren")
         confirm.addButton(withTitle: "Abbrechen")
         guard confirm.runModal() == .alertFirstButtonReturn else { return }
@@ -119,6 +125,9 @@ final class UpdateController: ObservableObject {
                     bundleIdentifier: bundleID,
                     currentAppURL: currentAppURL
                 )
+                // Recorded before the helper starts; the next launch re-checks
+                // everything, so a failed install never trashes anything.
+                self.recordOldCopyForTrash(prepared.oldCopyURL, version: release.version)
                 try await UpdateInstaller.launchHelper(prepared, waitingFor: pid)
                 UNUserNotificationCenter.current().removeAllDeliveredNotifications()
                 UpdateLog.logger.info("Beende MusicDesk für das Update")
@@ -126,6 +135,107 @@ final class UpdateController: ObservableObject {
             } catch {
                 self.isInstalling = false
                 self.fail(error)
+            }
+        }
+    }
+
+    // MARK: Applications folder
+
+    /// Call once after launch: if MusicDesk runs translocated or outside the
+    /// Applications folders, shows a hint once per version.
+    func showMoveToApplicationsHintIfNeeded() {
+        guard Bundle.main.bundleURL.pathExtension == "app", Bundle.main.bundleIdentifier != nil else { return }
+        guard !isInstalling else { return }
+        let location = AppLocation.detect(Bundle.main.bundleURL)
+        guard location.shouldOfferMove else { return }
+
+        let defaults = UserDefaults.standard
+        let key = SettingsKey.moveToApplicationsHintPrefix + currentVersion
+        guard !defaults.bool(forKey: key) else { return }
+        defaults.set(true, forKey: key)
+        UpdateLog.logger.info("Zeige Hinweis „In Programme verschieben“ (translociert: \(location.isTranslocated))")
+
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = "MusicDesk sollte im Ordner Programme liegen, damit Updates funktionieren."
+        if location.isTranslocated && location.isInApplicationsFolder {
+            alert.informativeText = "macOS startet MusicDesk gerade aus einer schreibgeschützten Kopie, weil die App noch als „aus dem Internet geladen“ markiert ist. „In Programme verschieben“ entfernt diese Markierung und startet MusicDesk neu."
+        } else if location.isTranslocated {
+            alert.informativeText = "macOS startet MusicDesk gerade aus einer schreibgeschützten Kopie (App Translocation). „In Programme verschieben“ legt MusicDesk in den Ordner Programme, startet die App neu und legt die alte Kopie in den Papierkorb."
+        } else {
+            alert.informativeText = "„In Programme verschieben“ legt MusicDesk in den Ordner Programme, startet die App neu und legt die alte Kopie in den Papierkorb."
+        }
+        alert.addButton(withTitle: "In Programme verschieben")
+        alert.addButton(withTitle: "Später")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        moveToApplications()
+    }
+
+    /// Copies the running app to /Applications (or ~/Applications), removes
+    /// the quarantine and relaunches from there – same helper as the updater.
+    func moveToApplications() {
+        guard !isInstalling else { return }
+        guard let bundleID = Bundle.main.bundleIdentifier else {
+            fail(UpdateError.notAnAppBundle, title: "Verschieben fehlgeschlagen", manualHint: "")
+            return
+        }
+        let currentAppURL = Bundle.main.bundleURL
+        let currentVersion = self.currentVersion
+        let pid = ProcessInfo.processInfo.processIdentifier
+        let previousStatus = status
+        isInstalling = true
+        status = .installing
+
+        Task { @MainActor in
+            do {
+                let workDir = try await UpdateInstaller.makeWorkDirectory()
+                let prepared = try await UpdateInstaller.prepareMove(
+                    workDirectory: workDir,
+                    currentVersion: currentVersion,
+                    bundleIdentifier: bundleID,
+                    currentAppURL: currentAppURL
+                )
+                // Recorded before the helper starts; the next launch re-checks
+                // everything, so a failed install never trashes anything.
+                self.recordOldCopyForTrash(prepared.oldCopyURL, version: currentVersion)
+                try await UpdateInstaller.launchHelper(prepared, waitingFor: pid)
+                UpdateLog.logger.info("Beende MusicDesk zum Verschieben nach \(prepared.targetAppURL.path, privacy: .public)")
+                NSApp.terminate(nil)
+            } catch {
+                self.isInstalling = false
+                self.fail(error, title: "Verschieben fehlgeschlagen",
+                          manualHint: "Manuell: MusicDesk beenden, MusicDesk.app im Finder in den Ordner Programme ziehen und von dort öffnen.")
+                self.status = previousStatus
+            }
+        }
+    }
+
+    /// Remembers the old copy so the next launch (from the new place) can move
+    /// it to the Trash – the helper script itself has no Trash API.
+    private func recordOldCopyForTrash(_ url: URL?, version: String) {
+        let defaults = UserDefaults.standard
+        guard let url else {
+            defaults.removeObject(forKey: SettingsKey.pendingOldCopyTrash)
+            return
+        }
+        defaults.set(["path": url.path, "version": version], forKey: SettingsKey.pendingOldCopyTrash)
+    }
+
+    private func cleanUpOldCopyIfNeeded() {
+        let defaults = UserDefaults.standard
+        guard let pending = defaults.dictionary(forKey: SettingsKey.pendingOldCopyTrash) else { return }
+        // One attempt only – after a rollback the old copy must stay.
+        defaults.removeObject(forKey: SettingsKey.pendingOldCopyTrash)
+        guard let path = pending["path"] as? String, let version = pending["version"] as? String,
+              let bundleID = Bundle.main.bundleIdentifier
+        else { return }
+        let currentVersion = self.currentVersion
+        let runningURL = Bundle.main.bundleURL
+        Task { @MainActor in
+            _ = try? await UpdateInstaller.offMain {
+                UpdateInstaller.trashOldCopy(path: path, expectedVersion: version, currentVersion: currentVersion,
+                                             bundleIdentifier: bundleID, runningAppURL: runningURL)
             }
         }
     }
@@ -226,12 +336,13 @@ final class UpdateController: ObservableObject {
         }
     }
 
-    private func fail(_ error: Error) {
+    private func fail(_ error: Error, title: String = "Update fehlgeschlagen", manualHint: String? = nil) {
         let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-        UpdateLog.logger.error("Update fehlgeschlagen: \(message, privacy: .public)")
+        UpdateLog.logger.error("\(title, privacy: .public): \(message, privacy: .public)")
         status = .failed(message: message)
-        showAlert(title: "Update fehlgeschlagen",
-                  text: message + "\n\nMusicDesk bleibt unverändert. Manuelle Installation: \(UpdateInstaller.releasesPageURL.absoluteString)",
+        showAlert(title: title,
+                  text: message + "\n\nMusicDesk bleibt unverändert. "
+                      + (manualHint ?? "Manuelle Installation: \(UpdateInstaller.releasesPageURL.absoluteString)"),
                   style: .warning)
     }
 

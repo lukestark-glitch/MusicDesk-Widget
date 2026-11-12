@@ -24,6 +24,9 @@ enum UpdateError: LocalizedError, Sendable {
     case signatureInvalid(String)
     case notAnAppBundle
     case notWritable(path: String)
+    case targetOccupied(path: String)
+    case newerVersionInstalled(version: String, path: String)
+    case copyFailed(String)
     case helper(String)
 
     var errorDescription: String? {
@@ -56,6 +59,12 @@ enum UpdateError: LocalizedError, Sendable {
             return "MusicDesk läuft nicht aus einer App (MusicDesk.app). Bitte das Update manuell installieren."
         case .notWritable(let path):
             return "Keine Schreibrechte für „\(path)“. Bitte das Update manuell installieren: ZIP von GitHub laden und MusicDesk.app ersetzen."
+        case .targetOccupied(let path):
+            return "Unter „\(path)“ liegt eine andere App mit demselben Namen. Bitte sie umbenennen oder entfernen und es erneut versuchen."
+        case .newerVersionInstalled(let version, let path):
+            return "Unter „\(path)“ ist bereits MusicDesk \(version) installiert. Bitte diese Version starten."
+        case .copyFailed(let detail):
+            return "MusicDesk konnte nicht kopiert werden (\(detail))."
         case .helper(let detail):
             return "Das Update konnte nicht gestartet werden (\(detail))."
         }
@@ -118,8 +127,22 @@ struct PreparedUpdate: Sendable {
     let newAppURL: URL
     let targetAppURL: URL
     let backupAppURL: URL
+    /// Opened by the helper if the installation fails (the copy the user ran).
+    let fallbackAppURL: URL
+    /// Old copy outside the Applications folders that the new app moves to the
+    /// Trash after a successful install (nil = nothing to clean up).
+    let oldCopyURL: URL?
     let scriptURL: URL
     let logURL: URL
+}
+
+/// Where an update (or "In Programme verschieben") installs the app.
+struct InstallPlan: Sendable {
+    let target: URL
+    let fallback: URL
+    let oldCopy: URL?
+    /// Target differs from the copy the user ran (e.g. ~/Downloads → /Applications).
+    var relocates: Bool { oldCopy != nil || !AppLocation.samePath(target, fallback) }
 }
 
 // MARK: - Installer (all blocking work runs off the main thread)
@@ -255,15 +278,11 @@ enum UpdateInstaller {
     private static func prepareSync(zipURL: URL, workDirectory: URL, expectedVersion: String,
                                     currentVersion: String, bundleIdentifier: String,
                                     currentAppURL: URL) throws -> PreparedUpdate {
-        let fm = FileManager.default
-
-        // Target checks first – cheap and the most likely failure.
-        let target = currentAppURL.standardizedFileURL.resolvingSymlinksInPath()
-        guard target.pathExtension == "app" else { throw UpdateError.notAnAppBundle }
-        let parent = target.deletingLastPathComponent()
-        guard fm.isWritableFile(atPath: parent.path), fm.isWritableFile(atPath: target.path) else {
-            throw UpdateError.notWritable(path: parent.path)
-        }
+        // Target checks first – cheap and the most likely failure. A
+        // translocated app outside the Applications folders is installed to
+        // /Applications (or ~/Applications) instead of its read-only copy.
+        let plan = try installPlan(currentAppURL: currentAppURL, moveToApplications: false)
+        UpdateLog.logger.info("Update-Ziel: \(plan.target.path, privacy: .public)")
 
         // Unzip.
         let extracted = workDirectory.appendingPathComponent("extracted", isDirectory: true)
@@ -296,26 +315,176 @@ enum UpdateInstaller {
             throw UpdateError.signatureInvalid(sign.output.isEmpty ? "codesign \(sign.status)" : sign.output)
         }
 
-        // Quarantine (failure is harmless, e.g. attribute not present).
-        let xattr = try run("/usr/bin/xattr", ["-dr", "com.apple.quarantine", newApp.path])
-        if xattr.status != 0 {
-            UpdateLog.logger.debug("xattr: \(xattr.status) \(xattr.output, privacy: .public)")
+        // Never replace a foreign app or a newer MusicDesk at a new target.
+        try checkExistingTarget(plan, bundleIdentifier: bundleIdentifier, installingVersion: foundVersion)
+
+        removeQuarantine(newApp)
+        return try finishPreparation(plan: plan, newApp: newApp, workDirectory: workDirectory)
+    }
+
+    /// Prepares "In Programme verschieben": copies the running bundle into the
+    /// work directory, removes the quarantine and writes the helper script.
+    /// Never touches the installed app.
+    static func prepareMove(workDirectory: URL, currentVersion: String, bundleIdentifier: String,
+                            currentAppURL: URL) async throws -> PreparedUpdate {
+        try await offMain {
+            try prepareMoveSync(workDirectory: workDirectory, currentVersion: currentVersion,
+                                bundleIdentifier: bundleIdentifier, currentAppURL: currentAppURL)
+        }
+    }
+
+    private static func prepareMoveSync(workDirectory: URL, currentVersion: String, bundleIdentifier: String,
+                                        currentAppURL: URL) throws -> PreparedUpdate {
+        let plan = try installPlan(currentAppURL: currentAppURL, moveToApplications: true)
+        UpdateLog.logger.info("Verschiebe-Ziel: \(plan.target.path, privacy: .public)")
+        try checkExistingTarget(plan, bundleIdentifier: bundleIdentifier, installingVersion: currentVersion)
+
+        // Copy the running bundle (for a translocated app this is the
+        // read-only mirror of the original – readable without extra access).
+        let staging = workDirectory.appendingPathComponent("staged", isDirectory: true)
+        try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
+        let newApp = staging.appendingPathComponent(appName, isDirectory: true)
+        let source = currentAppURL.standardizedFileURL
+        guard source.pathExtension == "app" else { throw UpdateError.notAnAppBundle }
+        let copy = try run("/usr/bin/ditto", [source.path, newApp.path])
+        guard copy.status == 0 else { throw UpdateError.copyFailed(copy.output.isEmpty ? "ditto \(copy.status)" : copy.output) }
+
+        let foundID = Self.bundleIdentifier(of: newApp) ?? "–"
+        guard foundID == bundleIdentifier else { throw UpdateError.wrongBundleIdentifier(found: foundID) }
+        let sign = try run("/usr/bin/codesign", ["--verify", "--deep", newApp.path])
+        UpdateLog.logger.info("codesign --verify (Kopie): \(sign.status) \(sign.output, privacy: .public)")
+        guard sign.status == 0 else {
+            throw UpdateError.signatureInvalid(sign.output.isEmpty ? "codesign \(sign.status)" : sign.output)
         }
 
-        // Helper script.
+        removeQuarantine(newApp)
+        return try finishPreparation(plan: plan, newApp: newApp, workDirectory: workDirectory)
+    }
+
+    // MARK: Target selection
+
+    /// Decides where to install.
+    /// - Translocated, original in /Applications or ~/Applications: replace the original.
+    /// - Translocated, original elsewhere (Downloads, Desktop …) or unknown:
+    ///   install to /Applications (writable) or ~/Applications; the original
+    ///   is moved to the Trash afterwards.
+    /// - Not translocated: replace in place – unless `moveToApplications` and
+    ///   the app is outside the Applications folders.
+    static func installPlan(currentAppURL: URL, moveToApplications: Bool) throws -> InstallPlan {
+        let location = AppLocation.detect(currentAppURL)
+        guard location.runningURL.pathExtension == "app" else { throw UpdateError.notAnAppBundle }
+        UpdateLog.logger.info("App-Ort: \(location.runningURL.path, privacy: .public), translociert: \(location.isTranslocated), Original: \(location.originalURL?.path ?? "unbekannt", privacy: .public)")
+
+        let relocate: Bool
+        if location.isTranslocated {
+            relocate = !location.isInApplicationsFolder
+        } else {
+            relocate = moveToApplications && !location.isInApplicationsFolder
+        }
+
+        if relocate {
+            let target = try AppLocation.applicationsDestination(appName: appName)
+            let fallback = location.originalURL ?? location.runningURL
+            var oldCopy = location.originalURL
+            if let old = oldCopy, AppLocation.samePath(old, target) || AppLocation.isInApplicationsFolder(old) {
+                oldCopy = nil
+            }
+            return InstallPlan(target: target, fallback: fallback, oldCopy: oldCopy)
+        }
+
+        // In place: the original (translocated) or the running bundle.
+        guard let original = location.originalURL else { throw UpdateError.notWritable(path: location.runningURL.path) }
+        let target = original.resolvingSymlinksInPath()
+        guard target.pathExtension == "app" else { throw UpdateError.notAnAppBundle }
+        let fm = FileManager.default
+        let parent = target.deletingLastPathComponent()
+        guard fm.isWritableFile(atPath: parent.path), fm.isWritableFile(atPath: target.path) else {
+            throw UpdateError.notWritable(path: parent.path)
+        }
+        return InstallPlan(target: target, fallback: target, oldCopy: nil)
+    }
+
+    /// An existing bundle at a new target must be MusicDesk and not newer
+    /// than what is being installed.
+    private static func checkExistingTarget(_ plan: InstallPlan, bundleIdentifier: String,
+                                            installingVersion: String) throws {
+        guard plan.relocates, FileManager.default.fileExists(atPath: plan.target.path) else { return }
+        guard Self.bundleIdentifier(of: plan.target) == bundleIdentifier else {
+            throw UpdateError.targetOccupied(path: plan.target.path)
+        }
+        if let existing = bundleVersion(of: plan.target), SemVer.isNewer(existing, than: installingVersion) {
+            throw UpdateError.newerVersionInstalled(version: existing, path: plan.target.path)
+        }
+    }
+
+    private static func finishPreparation(plan: InstallPlan, newApp: URL, workDirectory: URL) throws -> PreparedUpdate {
         let scriptURL = workDirectory.appendingPathComponent("install-update.sh")
         let logURL = workDirectory.appendingPathComponent("install-update.log")
         try helperScript.write(to: scriptURL, atomically: true, encoding: .utf8)
-        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
 
         return PreparedUpdate(
             workDirectory: workDirectory,
             newAppURL: newApp,
-            targetAppURL: target,
+            targetAppURL: plan.target,
             backupAppURL: workDirectory.appendingPathComponent("MusicDesk-old.app", isDirectory: true),
+            fallbackAppURL: plan.fallback,
+            oldCopyURL: plan.oldCopy,
             scriptURL: scriptURL,
             logURL: logURL
         )
+    }
+
+    /// Failure is harmless (e.g. attribute not present).
+    private static func removeQuarantine(_ app: URL) {
+        guard let xattr = try? run("/usr/bin/xattr", ["-dr", "com.apple.quarantine", app.path]) else { return }
+        if xattr.status != 0 {
+            UpdateLog.logger.debug("xattr: \(xattr.status) \(xattr.output, privacy: .public)")
+        }
+    }
+
+    private static func infoPlist(of app: URL) -> [String: Any]? {
+        let url = app.appendingPathComponent("Contents/Info.plist")
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return (try? PropertyListSerialization.propertyList(from: data, format: nil)) as? [String: Any]
+    }
+
+    static func bundleIdentifier(of app: URL) -> String? {
+        infoPlist(of: app)?["CFBundleIdentifier"] as? String
+    }
+
+    static func bundleVersion(of app: URL) -> String? {
+        infoPlist(of: app)?["CFBundleShortVersionString"] as? String
+    }
+
+    // MARK: Old copy cleanup
+
+    /// Moves the copy the user ran before an update/move to the Trash – only if
+    /// this app is now running non-translocated from an Applications folder,
+    /// has the expected version and the old copy is a MusicDesk bundle outside
+    /// the Applications folders. Call off the main thread.
+    static func trashOldCopy(path: String, expectedVersion: String, currentVersion: String,
+                             bundleIdentifier: String, runningAppURL: URL) {
+        let fm = FileManager.default
+        let old = URL(fileURLWithPath: path).standardizedFileURL
+        let location = AppLocation.detect(runningAppURL)
+        guard SemVer.compare(currentVersion, expectedVersion) == .orderedSame,
+              !location.isTranslocated, location.isInApplicationsFolder,
+              old.pathExtension == "app",
+              !AppLocation.isInApplicationsFolder(old),
+              !AppLocation.samePath(old, location.runningURL),
+              fm.fileExists(atPath: old.path),
+              Self.bundleIdentifier(of: old) == bundleIdentifier
+        else {
+            UpdateLog.logger.info("Alte Kopie bleibt liegen: \(old.path, privacy: .public)")
+            return
+        }
+        do {
+            try fm.trashItem(at: old, resultingItemURL: nil)
+            UpdateLog.logger.info("Alte Kopie in den Papierkorb gelegt: \(old.path, privacy: .public)")
+        } catch {
+            UpdateLog.logger.error("Alte Kopie nicht in den Papierkorb gelegt: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     private static func locateApp(in directory: URL) -> URL? {
@@ -351,6 +520,7 @@ enum UpdateInstaller {
                 prepared.newAppURL.path,
                 prepared.backupAppURL.path,
                 prepared.logURL.path,
+                prepared.fallbackAppURL.path,
             ]
             process.standardInput = FileHandle.nullDevice
             process.standardOutput = FileHandle.nullDevice
@@ -365,7 +535,8 @@ enum UpdateInstaller {
         }
     }
 
-    /// $1 pid, $2 installed app, $3 new app, $4 backup path, $5 log file.
+    /// $1 pid, $2 target app, $3 new app, $4 backup path, $5 log file,
+    /// $6 app to reopen if the installation fails (the copy the user ran).
     private static let helperScript = """
     #!/bin/sh
     PID="$1"
@@ -373,8 +544,17 @@ enum UpdateInstaller {
     NEW="$3"
     OLD="$4"
     LOG="$5"
+    FALLBACK="$6"
     exec >>"$LOG" 2>&1
+    reopen_previous() {
+        if [ -n "$FALLBACK" ] && [ -d "$FALLBACK" ]; then
+            /usr/bin/open "$FALLBACK"
+        elif [ -d "$TARGET" ]; then
+            /usr/bin/open "$TARGET"
+        fi
+    }
     echo "MusicDesk-Update: warte auf Prozess $PID"
+    echo "Ziel: $TARGET"
     i=0
     while kill -0 "$PID" 2>/dev/null; do
         i=$((i + 1))
@@ -386,14 +566,18 @@ enum UpdateInstaller {
     done
     if [ ! -d "$NEW" ]; then
         echo "Neue App fehlt: $NEW"
-        /usr/bin/open "$TARGET"
+        reopen_previous
         exit 1
     fi
+    HAD_TARGET=0
     /bin/rm -rf "$OLD"
-    if ! /bin/mv "$TARGET" "$OLD"; then
-        echo "Alte App konnte nicht verschoben werden"
-        /usr/bin/open "$TARGET"
-        exit 1
+    if [ -e "$TARGET" ]; then
+        if ! /bin/mv "$TARGET" "$OLD"; then
+            echo "Alte App konnte nicht verschoben werden"
+            reopen_previous
+            exit 1
+        fi
+        HAD_TARGET=1
     fi
     if /bin/mv "$NEW" "$TARGET"; then
         echo "Neue App per mv installiert"
@@ -404,11 +588,14 @@ enum UpdateInstaller {
         else
             echo "Installation fehlgeschlagen – stelle alte App wieder her"
             /bin/rm -rf "$TARGET"
-            /bin/mv "$OLD" "$TARGET" || /usr/bin/ditto "$OLD" "$TARGET"
-            /usr/bin/open "$TARGET"
+            if [ "$HAD_TARGET" = 1 ]; then
+                /bin/mv "$OLD" "$TARGET" || /usr/bin/ditto "$OLD" "$TARGET"
+            fi
+            reopen_previous
             exit 1
         fi
     fi
+    /usr/bin/xattr -dr com.apple.quarantine "$TARGET" || echo "xattr am Ziel: nichts zu entfernen"
     /usr/bin/open "$TARGET"
     echo "Fertig"
     exit 0
